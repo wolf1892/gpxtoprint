@@ -1,5 +1,8 @@
 node_modules/
 dist/
-*.png
 *.gpx
 .DS_Store
+
+# Ignore screenshots but keep showcase images
+screenshot*.png
+!public/showcase/*.png
