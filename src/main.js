@@ -143,16 +143,18 @@ rebuildBtn.addEventListener('click', async () => { terrainBuilder = null; if (cu
 
 exportBtn.addEventListener('click', async () => {
   if (!gpxData) return;
-  showLoading('Generating STL\u2026');
+  showLoading('Generating OBJ\u2026');
   try {
     if (!terrainBuilder) {
       terrainBuilder = new TerrainBuilder(gpxData, getSettings(), cachedStats);
       await terrainBuilder.build(p => { loadingText.textContent = `Loading terrain\u2026 ${Math.round(p * 100)}%`; });
     }
-    loadingText.textContent = 'Writing STL\u2026';
+    loadingText.textContent = 'Writing OBJ\u2026';
     await new Promise(r => setTimeout(r, 50));
-    const buffer = terrainBuilder.exportSTL();
-    download(buffer, 'track-terrain.stl', 'application/octet-stream');
+    const { obj, mtl } = terrainBuilder.exportOBJ();
+    download(mtl, 'track-terrain.mtl', 'text/plain');
+    await new Promise(r => setTimeout(r, 100));
+    download(obj, 'track-terrain.obj', 'text/plain');
   } catch (err) {
     console.error('Export failed:', err);
     alert('Export failed: ' + err.message);

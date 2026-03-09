@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { FontLoader } from 'three/examples/jsm/loaders/FontLoader.js';
 import { TextGeometry } from 'three/examples/jsm/geometries/TextGeometry.js';
 
@@ -8,17 +7,24 @@ const METERS_PER_DEG_LAT = 111320;
 const SQRT3 = Math.sqrt(3);
 const FONT_URL = 'https://threejs.org/examples/fonts/helvetiker_regular.typeface.json';
 
-const COLOR_STOPS = [
-  [0.00, [0.18, 0.50, 0.12]],
-  [0.08, [0.28, 0.56, 0.15]],
-  [0.18, [0.38, 0.58, 0.17]],
-  [0.30, [0.48, 0.56, 0.19]],
-  [0.42, [0.55, 0.52, 0.25]],
-  [0.55, [0.54, 0.47, 0.33]],
-  [0.68, [0.52, 0.48, 0.42]],
-  [0.80, [0.58, 0.56, 0.52]],
-  [0.90, [0.68, 0.66, 0.62]],
-  [1.00, [0.82, 0.80, 0.78]],
+// TrailPrint3D zone colors (matching the Blender plugin)
+const Z_BASE = 0, Z_FOREST = 1, Z_MOUNTAIN = 2, Z_WATER = 3;
+const ZONE_RGB = [
+  [0.05, 0.70, 0.05],  // BASE — green
+  [0.05, 0.25, 0.05],  // FOREST — dark green
+  [0.50, 0.50, 0.50],  // MOUNTAIN — grey
+  [0.00, 0.00, 0.80],  // WATER — blue
+];
+const MOUNTAIN_THRESHOLD = 0.60;
+
+const OBJ_MATERIALS = [
+  { name: 'BASE',     kd: [0.05, 0.70, 0.05] },
+  { name: 'FOREST',   kd: [0.05, 0.25, 0.05] },
+  { name: 'MOUNTAIN', kd: [0.50, 0.50, 0.50] },
+  { name: 'WATER',    kd: [0.00, 0.00, 0.80] },
+  { name: 'TRAIL',    kd: [1.00, 0.00, 0.00] },
+  { name: 'FRAME',    kd: [0.00, 0.00, 0.00] },
+  { name: 'TEXT',     kd: [1.00, 1.00, 1.00] },
 ];
 
 export class TerrainBuilder {
@@ -26,7 +32,7 @@ export class TerrainBuilder {
     this.tracks = gpxData.tracks;
     this.stats = stats || {};
     this.settings = {
-      gridSize: settings.gridResolution ?? 100,
+      gridSize: settings.gridResolution ?? 200,
       exaggeration: settings.exaggeration ?? 2,
       trackWidth: settings.trackWidth ?? 2,
       trackHeight: settings.trackHeight ?? 1.5,
@@ -46,7 +52,9 @@ export class TerrainBuilder {
     if (!allPoints.length) throw new Error('No track points found');
     this.bbox = this._calcBBox(allPoints, 0.15);
 
+    const osmPromise = fetchOSMFeatures(this.bbox);
     this.elevationGrid = await this._fetchTerrainTiles(onProgress);
+    this.osmFeatures = await osmPromise;
 
     try { this.font = await loadFont(); } catch { console.warn('[terrain] font load failed, skipping text'); }
 
@@ -55,10 +63,13 @@ export class TerrainBuilder {
 
   getGroup() { return this.group; }
 
-  exportSTL() {
-    const exporter = new STLExporter();
-    return exporter.parse(this.group, { binary: true });
+  exportOBJ() {
+    this.group.updateMatrixWorld(true);
+    const mtl = buildMTL();
+    const obj = buildOBJ(this.group, this._terrainZoneIds);
+    return { obj, mtl };
   }
+
 
   // ── Square bounding box (required for regular hexagon) ──
 
@@ -172,7 +183,8 @@ export class TerrainBuilder {
 
   _buildGroup(allPoints) {
     const { gridSize, exaggeration, baseHeight, modelSize, frameBorder, frameHeight } = this.settings;
-    const { elevations } = this.elevationGrid;
+    const { elevations, lats, lons } = this.elevationGrid;
+    const osm = this.osmFeatures || { water: [], forest: [] };
 
     const modelW = modelSize;
     const modelD = modelSize;
@@ -189,10 +201,12 @@ export class TerrainBuilder {
     if (!isFinite(minElev)) { minElev = 0; maxElev = 1; }
 
     // ── Terrain surface (hex-clipped) ──
-    const terrainY = new Float32Array(gridSize * gridSize);
-    const positions = new Float32Array(gridSize * gridSize * 3);
-    const colors = new Float32Array(gridSize * gridSize * 3);
-    const inside = new Uint8Array(gridSize * gridSize);
+    const total = gridSize * gridSize;
+    const terrainY = new Float32Array(total);
+    const positions = new Float32Array(total * 3);
+    const colors = new Float32Array(total * 3);
+    const inside = new Uint8Array(total);
+    const zoneIds = new Uint8Array(total);
 
     for (let r = 0; r < gridSize; r++) {
       for (let c = 0; c < gridSize; c++) {
@@ -208,10 +222,23 @@ export class TerrainBuilder {
         terrainY[idx] = y;
         inside[idx] = insideHex(x, z, hexR) ? 1 : 0;
 
+        const lat = lats[idx], lon = lons[idx];
         const t = (elev - minElev) / (maxElev - minElev || 1);
-        elevToColor(t, colors, idx * 3);
+
+        let zid;
+        if (isInAnyPolygon(lat, lon, osm.water)) zid = Z_WATER;
+        else if (isInAnyPolygon(lat, lon, osm.forest)) zid = Z_FOREST;
+        else if (t >= MOUNTAIN_THRESHOLD) zid = Z_MOUNTAIN;
+        else zid = Z_BASE;
+
+        zoneIds[idx] = zid;
+        const rgb = ZONE_RGB[zid];
+        colors[idx * 3] = rgb[0];
+        colors[idx * 3 + 1] = rgb[1];
+        colors[idx * 3 + 2] = rgb[2];
       }
     }
+    this._terrainZoneIds = zoneIds;
 
     const indices = [];
     for (let r = 0; r < gridSize - 1; r++) {
@@ -227,7 +254,9 @@ export class TerrainBuilder {
     terrainGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     terrainGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     terrainGeo.computeVertexNormals();
+    const maxTerrainY = (maxElev - minElev) * vScale;
     const terrainMesh = new THREE.Mesh(terrainGeo, new THREE.MeshPhongMaterial({ vertexColors: true, side: THREE.DoubleSide, shininess: 15 }));
+    terrainMesh.userData = { role: 'terrain', maxTerrainY };
 
     const outerR = hexR + frameBorder;
     const frameBottom = -baseHeight - frameHeight;
@@ -242,15 +271,13 @@ export class TerrainBuilder {
       }
     } catch (e) { console.warn('[terrain] track tube error:', e.message); }
 
-    // ── Solid watertight shell ──
-    // Inner hex walls: terrain edge → frame bottom (full depth)
     const innerWalls = this._buildHexWalls(terrainY, gridSize, modelW, modelD, hexR, baseHeight + frameHeight);
-    // Frame top annulus at y = -baseHeight bridging hexR → outerR
     const frameAnnulus = buildHexAnnulus(hexR, outerR, -baseHeight, FRAME_MAT());
-    // Frame outer walls: -baseHeight → frameBottom
+    frameAnnulus.userData = { role: 'frame' };
     const outerWalls = buildHexRing(outerR, -baseHeight, frameBottom, FRAME_MAT(), false);
-    // Single bottom plate covering full outerR at frameBottom
+    outerWalls.userData = { role: 'frame' };
     const bottomPlate = buildHexPlate(outerR, frameBottom, null, true, FRAME_MAT());
+    bottomPlate.userData = { role: 'frame' };
 
     // ── Text ──
     const textMeshes = this._buildTextLabels(hexR, frameBorder, frameHeight, baseHeight);
@@ -313,7 +340,9 @@ export class TerrainBuilder {
     if (deduped.length < 2) return null;
     const curve = new THREE.CatmullRomCurve3(deduped, false, 'centripetal', 0.5);
     const geo = new THREE.TubeGeometry(curve, Math.max(deduped.length * 3, 64), radius, 6, false);
-    return new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ color: 0xe53020, shininess: 40, side: THREE.DoubleSide }));
+    const mesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ color: 0xe53020, shininess: 40, side: THREE.DoubleSide }));
+    mesh.userData = { role: 'track' };
+    return mesh;
   }
 
   // ── Hex walls (terrain edge → full bottom depth) ──
@@ -338,7 +367,9 @@ export class TerrainBuilder {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
     geo.computeVertexNormals();
-    return new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ color: 0x3a3a50, side: THREE.DoubleSide, flatShading: true }));
+    const mesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ color: 0x3a3a50, side: THREE.DoubleSide, flatShading: true }));
+    mesh.userData = { role: 'frame' };
+    return mesh;
   }
 
   // _buildFrame removed — frame is now built as part of the unified solid shell
@@ -388,6 +419,7 @@ export class TerrainBuilder {
         const th = geo.boundingBox.max.y - geo.boundingBox.min.y;
 
         const inner = new THREE.Mesh(geo, textMat);
+        inner.userData = { role: 'text' };
         inner.position.set(-tw / 2, -th / 2, 0);
 
         const pivot = new THREE.Group();
@@ -549,20 +581,149 @@ function loadFont() {
   return _fontPromise;
 }
 
-function elevToColor(t, arr, off) {
-  t = Math.max(0, Math.min(1, t));
-  for (let i = 0; i < COLOR_STOPS.length - 1; i++) {
-    const [t0, c0] = COLOR_STOPS[i], [t1, c1] = COLOR_STOPS[i + 1];
-    if (t >= t0 && t <= t1) {
-      const s = (t - t0) / (t1 - t0);
-      arr[off] = c0[0] + (c1[0] - c0[0]) * s;
-      arr[off + 1] = c0[1] + (c1[1] - c0[1]) * s;
-      arr[off + 2] = c0[2] + (c1[2] - c0[2]) * s;
-      return;
-    }
+// ═══════════ OBJ + MTL export ═══════════
+
+function buildMTL() {
+  const lines = ['# TrailPrint3D Materials'];
+  for (const m of OBJ_MATERIALS) {
+    lines.push('', `newmtl ${m.name}`, `Kd ${m.kd[0]} ${m.kd[1]} ${m.kd[2]}`, 'Ka 0.1 0.1 0.1', 'd 1.0');
   }
-  const last = COLOR_STOPS[COLOR_STOPS.length - 1][1];
-  arr[off] = last[0]; arr[off + 1] = last[1]; arr[off + 2] = last[2];
+  return lines.join('\n');
+}
+
+function buildOBJ(group, terrainZoneIds) {
+  const lines = ['# TrailPrint3D OBJ Export', 'mtllib track-terrain.mtl', ''];
+  let vOff = 0;
+
+  group.traverse(obj => {
+    if (!obj.isMesh) return;
+
+    const geo = obj.geometry.clone();
+    geo.applyMatrix4(obj.matrixWorld);
+
+    const pos = geo.getAttribute('position');
+    const idx = geo.getIndex();
+    const role = obj.userData.role || 'frame';
+
+    for (let i = 0; i < pos.count; i++) {
+      lines.push(`v ${pos.getX(i).toFixed(4)} ${pos.getY(i).toFixed(4)} ${pos.getZ(i).toFixed(4)}`);
+    }
+
+    const triCount = idx ? idx.count / 3 : pos.count / 3;
+
+    if (role === 'terrain' && terrainZoneIds) {
+      const buckets = [[], [], [], []];
+      for (let i = 0; i < triCount; i++) {
+        let a, b, c;
+        if (idx) { a = idx.getX(i * 3); b = idx.getX(i * 3 + 1); c = idx.getX(i * 3 + 2); }
+        else { a = i * 3; b = i * 3 + 1; c = i * 3 + 2; }
+        const zid = terrainZoneIds[a] ?? Z_BASE;
+        buckets[zid].push(a, b, c);
+      }
+      for (let z = 0; z < 4; z++) {
+        if (!buckets[z].length) continue;
+        lines.push(`usemtl ${OBJ_MATERIALS[z].name}`);
+        for (let i = 0; i < buckets[z].length; i += 3) {
+          lines.push(`f ${buckets[z][i] + vOff + 1} ${buckets[z][i + 1] + vOff + 1} ${buckets[z][i + 2] + vOff + 1}`);
+        }
+      }
+    } else {
+      let matName;
+      switch (role) {
+        case 'track': matName = 'TRAIL'; break;
+        case 'text':  matName = 'TEXT'; break;
+        default:      matName = 'FRAME'; break;
+      }
+      lines.push(`usemtl ${matName}`);
+      for (let i = 0; i < triCount; i++) {
+        let a, b, c;
+        if (idx) { a = idx.getX(i * 3); b = idx.getX(i * 3 + 1); c = idx.getX(i * 3 + 2); }
+        else { a = i * 3; b = i * 3 + 1; c = i * 3 + 2; }
+        lines.push(`f ${a + vOff + 1} ${b + vOff + 1} ${c + vOff + 1}`);
+      }
+    }
+
+    vOff += pos.count;
+    geo.dispose();
+  });
+
+  return lines.join('\n');
+}
+
+// ═══════════ OSM feature fetching (water / forest) ═══════════
+
+async function fetchOSMFeatures(bbox) {
+  const { south, north, west, east } = bbox;
+  const query = `[out:json][timeout:25];(
+way["natural"="water"](${south},${west},${north},${east});
+way["water"="lake"](${south},${west},${north},${east});
+way["water"="river"](${south},${west},${north},${east});
+way["natural"="wood"](${south},${west},${north},${east});
+way["landuse"="forest"](${south},${west},${north},${east});
+);out body;>;out skel qt;`;
+
+  try {
+    const resp = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      body: `data=${encodeURIComponent(query)}`,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+    if (!resp.ok) throw new Error(`Overpass HTTP ${resp.status}`);
+    const data = await resp.json();
+
+    const nodes = new Map();
+    for (const el of data.elements) {
+      if (el.type === 'node') nodes.set(el.id, [el.lat, el.lon]);
+    }
+
+    const water = [], forest = [];
+    for (const el of data.elements) {
+      if (el.type !== 'way' || !el.nodes || el.nodes.length < 4) continue;
+      if (el.nodes[0] !== el.nodes[el.nodes.length - 1]) continue;
+
+      const coords = [];
+      for (const nid of el.nodes) {
+        const n = nodes.get(nid);
+        if (n) coords.push(n);
+      }
+      if (coords.length < 4) continue;
+
+      let sLat = Infinity, nLat = -Infinity, wLon = Infinity, eLon = -Infinity;
+      for (const [la, lo] of coords) {
+        if (la < sLat) sLat = la; if (la > nLat) nLat = la;
+        if (lo < wLon) wLon = lo; if (lo > eLon) eLon = lo;
+      }
+      const poly = { coords, bbox: [sLat, nLat, wLon, eLon] };
+
+      const tags = el.tags || {};
+      if (tags.natural === 'water' || tags.water || tags.waterway) water.push(poly);
+      else if (tags.natural === 'wood' || tags.landuse === 'forest') forest.push(poly);
+    }
+
+    console.log(`[terrain] OSM: ${water.length} water, ${forest.length} forest polygons`);
+    return { water, forest };
+  } catch (err) {
+    console.warn('[terrain] OSM fetch failed, using elevation-only coloring:', err.message);
+    return { water: [], forest: [] };
+  }
+}
+
+function pointInPolygon(lat, lon, coords) {
+  let inside = false;
+  for (let i = 0, j = coords.length - 1; i < coords.length; j = i++) {
+    const [yi, xi] = coords[i], [yj, xj] = coords[j];
+    if (((yi > lat) !== (yj > lat)) && (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi))
+      inside = !inside;
+  }
+  return inside;
+}
+
+function isInAnyPolygon(lat, lon, polys) {
+  for (const p of polys) {
+    if (lat < p.bbox[0] || lat > p.bbox[1] || lon < p.bbox[2] || lon > p.bbox[3]) continue;
+    if (pointInPolygon(lat, lon, p.coords)) return true;
+  }
+  return false;
 }
 
 function fmtTime(sec) {
