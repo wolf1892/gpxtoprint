@@ -35,7 +35,6 @@ export class TerrainBuilder {
       gridSize: settings.gridResolution ?? 350,
       exaggeration: settings.exaggeration ?? 2,
       trackWidth: settings.trackWidth ?? 2,
-      trackHeight: settings.trackHeight ?? 0.4,
       baseHeight: settings.baseHeight ?? 5,
       modelSize: settings.modelSize ?? 150,
       frameBorder: 12,
@@ -251,7 +250,7 @@ export class TerrainBuilder {
     try {
       const segments = this._projectTrack(allPoints, terrainY, gridSize, modelW, modelD, hexR);
       for (const seg of segments) {
-        const m = this._buildTrackTube(seg);
+        const m = this._buildTrackTube(seg, terrainY, gridSize, modelW, modelD);
         if (m) trackMeshes.push(m);
       }
     } catch (e) { console.warn('[terrain] track tube error:', e.message); }
@@ -269,7 +268,6 @@ export class TerrainBuilder {
 
   _projectTrack(points, terrainY, gridSize, modelW, modelD, hexR) {
     const { south, north, west, east } = this.bbox;
-    const { trackHeight } = this.settings;
     const clipR = hexR;
     const segments = [];
     let current = [];
@@ -285,22 +283,14 @@ export class TerrainBuilder {
         continue;
       }
 
-      const uC = Math.max(0, Math.min(1, u)), vC = Math.max(0, Math.min(1, v));
-      const col = uC * (gridSize - 1), row = vC * (gridSize - 1);
-      const c0 = Math.max(0, Math.min(gridSize - 2, Math.floor(col)));
-      const r0 = Math.max(0, Math.min(gridSize - 2, Math.floor(row)));
-      const ct = Math.max(0, Math.min(1, col - c0)), rt = Math.max(0, Math.min(1, row - r0));
-      const h = (1 - ct) * (1 - rt) * terrainY[r0 * gridSize + c0]
-        + ct * (1 - rt) * terrainY[r0 * gridSize + c0 + 1]
-        + (1 - ct) * rt * terrainY[(r0 + 1) * gridSize + c0]
-        + ct * rt * terrainY[(r0 + 1) * gridSize + c0 + 1];
-      current.push(new THREE.Vector3(x, h + trackHeight, z));
+      const h = sampleTerrain(x, z, terrainY, gridSize, modelW, modelD);
+      current.push(new THREE.Vector3(x, h, z));
     }
     if (current.length >= 2) segments.push(current);
     return segments;
   }
 
-  _buildTrackTube(pts) {
+  _buildTrackTube(pts, terrainY, gridSize, modelW, modelD) {
     if (pts.length < 2) return null;
     const radius = this.settings.trackWidth / 2;
     const minD = radius * 0.1;
@@ -314,8 +304,19 @@ export class TerrainBuilder {
       deduped = s;
     }
     if (deduped.length < 2) return null;
-    const curve = new THREE.CatmullRomCurve3(deduped, false, 'centripetal', 0.5);
-    const geo = new THREE.TubeGeometry(curve, Math.max(deduped.length * 3, 64), radius, 8, false);
+
+    const roughCurve = new THREE.CatmullRomCurve3(deduped, false, 'centripetal', 0.5);
+    const sampleCount = Math.max(deduped.length * 6, 400);
+    const snapped = [];
+    for (let i = 0; i <= sampleCount; i++) {
+      const p = roughCurve.getPoint(i / sampleCount);
+      const terrainH = sampleTerrain(p.x, p.z, terrainY, gridSize, modelW, modelD);
+      p.y = terrainH + radius;
+      snapped.push(p);
+    }
+
+    const curve = new THREE.CatmullRomCurve3(snapped, false, 'centripetal', 0.1);
+    const geo = new THREE.TubeGeometry(curve, sampleCount, radius, 8, false);
     const mesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ color: 0xe53020, shininess: 40, side: THREE.DoubleSide }));
     mesh.userData = { role: 'track' };
     return mesh;
