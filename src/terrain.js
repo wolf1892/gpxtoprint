@@ -32,10 +32,10 @@ export class TerrainBuilder {
     this.tracks = gpxData.tracks;
     this.stats = stats || {};
     this.settings = {
-      gridSize: settings.gridResolution ?? 200,
+      gridSize: settings.gridResolution ?? 350,
       exaggeration: settings.exaggeration ?? 2,
       trackWidth: settings.trackWidth ?? 2,
-      trackHeight: settings.trackHeight ?? 1.5,
+      trackHeight: settings.trackHeight ?? 0.4,
       baseHeight: settings.baseHeight ?? 5,
       modelSize: settings.modelSize ?? 150,
       frameBorder: 12,
@@ -306,8 +306,8 @@ export class TerrainBuilder {
     const minD = radius * 0.1;
     let deduped = [pts[0]];
     for (let i = 1; i < pts.length; i++) if (pts[i].distanceTo(deduped[deduped.length - 1]) > minD) deduped.push(pts[i]);
-    if (deduped.length > 800) {
-      const step = Math.ceil(deduped.length / 800);
+    if (deduped.length > 2000) {
+      const step = Math.ceil(deduped.length / 2000);
       const s = [deduped[0]];
       for (let i = step; i < deduped.length - 1; i += step) s.push(deduped[i]);
       s.push(deduped[deduped.length - 1]);
@@ -315,7 +315,7 @@ export class TerrainBuilder {
     }
     if (deduped.length < 2) return null;
     const curve = new THREE.CatmullRomCurve3(deduped, false, 'centripetal', 0.5);
-    const geo = new THREE.TubeGeometry(curve, Math.max(deduped.length * 3, 64), radius, 6, false);
+    const geo = new THREE.TubeGeometry(curve, Math.max(deduped.length * 3, 64), radius, 8, false);
     const mesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ color: 0xe53020, shininess: 40, side: THREE.DoubleSide }));
     mesh.userData = { role: 'track' };
     return mesh;
