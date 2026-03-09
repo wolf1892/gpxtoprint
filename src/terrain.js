@@ -489,7 +489,7 @@ export class TerrainBuilder {
       const fontSize = Math.min(border * 0.5, edgeLen * 0.065);
       try {
         const geo = new TextGeometry(text, {
-          font: this.font, size: fontSize, depth: 0.4,
+          font: this.font, size: fontSize, depth: 1.2,
           curveSegments: 3, bevelEnabled: false,
         });
         geo.computeBoundingBox();
