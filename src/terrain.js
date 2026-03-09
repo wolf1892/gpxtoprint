@@ -190,6 +190,9 @@ export class TerrainBuilder {
     const modelW = modelSize;
     const modelD = modelSize;
     const hexR = modelSize / 2;
+    const outerR = hexR + frameBorder;
+    const baseY = -baseHeight;
+    const frameBottom = -baseHeight - frameHeight;
 
     const centerLat = (this.bbox.south + this.bbox.north) / 2;
     const mPerDegLon = METERS_PER_DEG_LAT * Math.cos(centerLat * DEG2RAD);
@@ -201,13 +204,12 @@ export class TerrainBuilder {
     for (const e of elevations) if (isFinite(e)) { minElev = Math.min(minElev, e); maxElev = Math.max(maxElev, e); }
     if (!isFinite(minElev)) { minElev = 0; maxElev = 1; }
 
-    // ── Terrain surface (hex-clipped) ──
     const total = gridSize * gridSize;
     const terrainY = new Float32Array(total);
-    const positions = new Float32Array(total * 3);
-    const colors = new Float32Array(total * 3);
     const inside = new Uint8Array(total);
     const zoneIds = new Uint8Array(total);
+    const gridX = new Float32Array(total);
+    const gridZ = new Float32Array(total);
 
     for (let r = 0; r < gridSize; r++) {
       for (let c = 0; c < gridSize; c++) {
@@ -217,52 +219,34 @@ export class TerrainBuilder {
         const z = -((r / (gridSize - 1) - 0.5) * modelD);
         const y = (elev - minElev) * vScale;
 
-        positions[idx * 3] = x;
-        positions[idx * 3 + 1] = y;
-        positions[idx * 3 + 2] = z;
+        gridX[idx] = x;
+        gridZ[idx] = z;
         terrainY[idx] = y;
         inside[idx] = insideHex(x, z, hexR) ? 1 : 0;
 
         const lat = lats[idx], lon = lons[idx];
         const t = (elev - minElev) / (maxElev - minElev || 1);
 
-        let zid;
-        if (isInAnyPolygon(lat, lon, osm.water)) zid = Z_WATER;
-        else if (isInAnyPolygon(lat, lon, osm.forest)) zid = Z_FOREST;
-        else if (t >= MOUNTAIN_THRESHOLD) zid = Z_MOUNTAIN;
-        else zid = Z_BASE;
-
-        zoneIds[idx] = zid;
-        const rgb = ZONE_RGB[zid];
-        colors[idx * 3] = rgb[0];
-        colors[idx * 3 + 1] = rgb[1];
-        colors[idx * 3 + 2] = rgb[2];
+        if (isInAnyPolygon(lat, lon, osm.water)) zoneIds[idx] = Z_WATER;
+        else if (isInAnyPolygon(lat, lon, osm.forest)) zoneIds[idx] = Z_FOREST;
+        else if (t >= MOUNTAIN_THRESHOLD) zoneIds[idx] = Z_MOUNTAIN;
+        else zoneIds[idx] = Z_BASE;
       }
     }
     this._terrainZoneIds = zoneIds;
 
-    const indices = [];
-    for (let r = 0; r < gridSize - 1; r++) {
-      for (let c = 0; c < gridSize - 1; c++) {
-        const tl = r * gridSize + c, tr = tl + 1, bl = tl + gridSize, br = bl + 1;
-        if (inside[tl] && inside[bl] && inside[tr]) indices.push(tl, bl, tr);
-        if (inside[tr] && inside[bl] && inside[br]) indices.push(tr, bl, br);
-      }
-    }
-
-    const terrainGeo = new THREE.BufferGeometry();
-    terrainGeo.setIndex(indices);
-    terrainGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    terrainGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    terrainGeo.computeVertexNormals();
     const maxTerrainY = (maxElev - minElev) * vScale;
-    const terrainMesh = new THREE.Mesh(terrainGeo, new THREE.MeshPhongMaterial({ vertexColors: true, side: THREE.DoubleSide, shininess: 15 }));
-    terrainMesh.userData = { role: 'terrain', maxTerrainY };
 
-    const outerR = hexR + frameBorder;
-    const frameBottom = -baseHeight - frameHeight;
+    const terrainSolid = this._buildTerrainSolid(
+      gridX, gridZ, terrainY, inside, zoneIds,
+      gridSize, modelW, modelD, hexR, frameBottom
+    );
+    terrainSolid.userData.role = 'terrain';
+    terrainSolid.userData.maxTerrainY = maxTerrainY;
 
-    // ── Track tubes (clipped to hex) ──
+    const frameSolid = this._buildFrameSolid(hexR, outerR, baseY, frameBottom);
+    frameSolid.userData = { role: 'frame' };
+
     const trackMeshes = [];
     try {
       const segments = this._projectTrack(allPoints, terrainY, gridSize, modelW, modelD, hexR);
@@ -272,19 +256,10 @@ export class TerrainBuilder {
       }
     } catch (e) { console.warn('[terrain] track tube error:', e.message); }
 
-    const innerWalls = this._buildHexWalls(terrainY, gridSize, modelW, modelD, hexR, baseHeight + frameHeight);
-    const frameAnnulus = buildHexAnnulus(hexR, outerR, -baseHeight, FRAME_MAT());
-    frameAnnulus.userData = { role: 'frame' };
-    const outerWalls = buildHexRing(outerR, -baseHeight, frameBottom, FRAME_MAT(), false);
-    outerWalls.userData = { role: 'frame' };
-    const bottomPlate = buildHexPlate(outerR, frameBottom, null, true, FRAME_MAT());
-    bottomPlate.userData = { role: 'frame' };
-
-    // ── Text ──
     const textMeshes = this._buildTextLabels(hexR, frameBorder, frameHeight, baseHeight);
 
     const group = new THREE.Group();
-    group.add(terrainMesh, innerWalls, frameAnnulus, outerWalls, bottomPlate);
+    group.add(terrainSolid, frameSolid);
     for (const m of textMeshes) group.add(m);
     for (const m of trackMeshes) group.add(m);
     return group;
@@ -346,34 +321,134 @@ export class TerrainBuilder {
     return mesh;
   }
 
-  // ── Hex walls (terrain edge → full bottom depth) ──
+  // ── Watertight terrain solid (top surface + hex walls + bottom plate) ──
 
-  _buildHexWalls(terrainY, gridSize, modelW, modelD, hexR, totalDepth) {
+  _buildTerrainSolid(gridX, gridZ, terrainY, inside, zoneIds, gridSize, modelW, modelD, hexR, bottomY) {
+    const total = gridSize * gridSize;
+    const WALL_N = 80;
     const hexV = hexVertices(hexR);
-    const verts = [];
-    const baseY = -totalDepth;
-    const N = 60;
+    const wallCount = 6 * (WALL_N + 1);
+    const vertCount = total + wallCount * 2 + 1;
 
+    const positions = new Float32Array(vertCount * 3);
+    const colors = new Float32Array(vertCount * 3);
+
+    for (let i = 0; i < total; i++) {
+      positions[i * 3] = gridX[i];
+      positions[i * 3 + 1] = terrainY[i];
+      positions[i * 3 + 2] = gridZ[i];
+      const rgb = ZONE_RGB[zoneIds[i]];
+      colors[i * 3] = rgb[0];
+      colors[i * 3 + 1] = rgb[1];
+      colors[i * 3 + 2] = rgb[2];
+    }
+
+    const wallTopStart = total;
+    const wallBotStart = total + wallCount;
+    let wi = 0;
     for (let e = 0; e < 6; e++) {
       const [ax, az] = hexV[e], [bx, bz] = hexV[(e + 1) % 6];
-      for (let s = 0; s < N; s++) {
-        const t1 = s / N, t2 = (s + 1) / N;
-        const x1 = ax + (bx - ax) * t1, z1 = az + (bz - az) * t1;
-        const x2 = ax + (bx - ax) * t2, z2 = az + (bz - az) * t2;
-        const y1 = sampleTerrain(x1, z1, terrainY, gridSize, modelW, modelD);
-        const y2 = sampleTerrain(x2, z2, terrainY, gridSize, modelW, modelD);
-        verts.push(x1, y1, z1, x2, baseY, z2, x2, y2, z2, x1, y1, z1, x1, baseY, z1, x2, baseY, z2);
+      for (let s = 0; s <= WALL_N; s++) {
+        const t = s / WALL_N;
+        const x = ax + (bx - ax) * t;
+        const z = az + (bz - az) * t;
+        const topH = sampleTerrain(x, z, terrainY, gridSize, modelW, modelD);
+
+        const ti = (wallTopStart + wi) * 3;
+        positions[ti] = x; positions[ti + 1] = topH; positions[ti + 2] = z;
+        colors[ti] = 0.1; colors[ti + 1] = 0.1; colors[ti + 2] = 0.1;
+
+        const bi = (wallBotStart + wi) * 3;
+        positions[bi] = x; positions[bi + 1] = bottomY; positions[bi + 2] = z;
+        colors[bi] = 0.05; colors[bi + 1] = 0.05; colors[bi + 2] = 0.05;
+        wi++;
       }
     }
+
+    const ci = (total + wallCount * 2) * 3;
+    positions[ci] = 0; positions[ci + 1] = bottomY; positions[ci + 2] = 0;
+    colors[ci] = 0.05; colors[ci + 1] = 0.05; colors[ci + 2] = 0.05;
+
+    const indices = [];
+
+    for (let r = 0; r < gridSize - 1; r++) {
+      for (let c = 0; c < gridSize - 1; c++) {
+        const tl = r * gridSize + c, tr = tl + 1, bl = tl + gridSize, br = bl + 1;
+        if (inside[tl] && inside[bl] && inside[tr]) indices.push(tl, bl, tr);
+        if (inside[tr] && inside[bl] && inside[br]) indices.push(tr, bl, br);
+      }
+    }
+    const topFaceCount = indices.length / 3;
+
+    wi = 0;
+    for (let e = 0; e < 6; e++) {
+      for (let s = 0; s < WALL_N; s++) {
+        const tl = wallTopStart + wi + s;
+        const tr = wallTopStart + wi + s + 1;
+        const bl = wallBotStart + wi + s;
+        const br = wallBotStart + wi + s + 1;
+        indices.push(tl, tr, bl);
+        indices.push(bl, tr, br);
+      }
+      wi += WALL_N + 1;
+    }
+
+    const centerIdx = total + wallCount * 2;
+    wi = 0;
+    for (let e = 0; e < 6; e++) {
+      for (let s = 0; s < WALL_N; s++) {
+        const a = wallBotStart + wi + s;
+        const b = wallBotStart + wi + s + 1;
+        indices.push(centerIdx, a, b);
+      }
+      wi += WALL_N + 1;
+    }
+
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+    geo.setIndex(indices);
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.computeVertexNormals();
-    const mesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ color: 0x3a3a50, side: THREE.DoubleSide, flatShading: true }));
-    mesh.userData = { role: 'frame' };
+
+    const mesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({
+      vertexColors: true, side: THREE.DoubleSide, shininess: 15
+    }));
+    mesh.userData.topFaceCount = topFaceCount;
     return mesh;
   }
 
-  // _buildFrame removed — frame is now built as part of the unified solid shell
+  // ── Watertight frame solid (annulus + inner/outer walls + bottom ring) ──
+
+  _buildFrameSolid(innerR, outerR, topY, bottomY) {
+    const iv = hexVertices(innerR);
+    const ov = hexVertices(outerR);
+    const verts = [];
+
+    for (let i = 0; i < 6; i++) {
+      const n = (i + 1) % 6;
+      verts.push(
+        iv[i][0], topY, iv[i][1], ov[i][0], topY, ov[i][1], iv[n][0], topY, iv[n][1],
+        iv[n][0], topY, iv[n][1], ov[i][0], topY, ov[i][1], ov[n][0], topY, ov[n][1]
+      );
+      verts.push(
+        iv[i][0], bottomY, iv[i][1], iv[n][0], bottomY, iv[n][1], ov[i][0], bottomY, ov[i][1],
+        iv[n][0], bottomY, iv[n][1], ov[n][0], bottomY, ov[n][1], ov[i][0], bottomY, ov[i][1]
+      );
+      verts.push(
+        iv[i][0], topY, iv[i][1], iv[n][0], topY, iv[n][1], iv[i][0], bottomY, iv[i][1],
+        iv[n][0], topY, iv[n][1], iv[n][0], bottomY, iv[n][1], iv[i][0], bottomY, iv[i][1]
+      );
+      verts.push(
+        ov[i][0], topY, ov[i][1], ov[i][0], bottomY, ov[i][1], ov[n][0], topY, ov[n][1],
+        ov[n][0], topY, ov[n][1], ov[i][0], bottomY, ov[i][1], ov[n][0], bottomY, ov[n][1]
+      );
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
+    geo.computeVertexNormals();
+    return new THREE.Mesh(geo, FRAME_MAT());
+  }
 
   // ── Text labels flat on frame top surface ──
 
@@ -488,60 +563,6 @@ function sampleTerrain(x, z, terrainY, gridSize, modelW, modelD) {
     + ct * rt * terrainY[(r0 + 1) * gridSize + c0 + 1];
 }
 
-function buildHexPlate(R, y, colorHex, flipNormal, existingMat) {
-  const hv = hexVertices(R);
-  const verts = [];
-  for (let i = 0; i < 6; i++) {
-    const [ax, az] = hv[i], [bx, bz] = hv[(i + 1) % 6];
-    if (flipNormal) verts.push(0, y, 0, bx, y, bz, ax, y, az);
-    else verts.push(0, y, 0, ax, y, az, bx, y, bz);
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
-  geo.computeVertexNormals();
-  const mat = existingMat || new THREE.MeshPhongMaterial({ color: colorHex, side: THREE.DoubleSide });
-  return new THREE.Mesh(geo, mat);
-}
-
-function buildHexAnnulus(innerR, outerR, y, mat) {
-  const iv = hexVertices(innerR), ov = hexVertices(outerR);
-  const verts = [];
-  for (let i = 0; i < 6; i++) {
-    const n = (i + 1) % 6;
-    const [ia, iz] = iv[i], [ib, ibz] = iv[n];
-    const [oa, oz] = ov[i], [ob, obz] = ov[n];
-    // Two triangles per edge segment
-    verts.push(ia, y, iz, oa, y, oz, ib, y, ibz);
-    verts.push(ib, y, ibz, oa, y, oz, ob, y, obz);
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
-  geo.computeVertexNormals();
-  return new THREE.Mesh(geo, mat);
-}
-
-function buildHexRing(R, topY, botY, mat, flipNormal) {
-  const hv = hexVertices(R);
-  const verts = [];
-  const N = 1; // 1 quad per edge is enough for flat hex sides
-  for (let e = 0; e < 6; e++) {
-    const [ax, az] = hv[e], [bx, bz] = hv[(e + 1) % 6];
-    for (let s = 0; s < N; s++) {
-      const t1 = s / N, t2 = (s + 1) / N;
-      const x1 = ax + (bx - ax) * t1, z1 = az + (bz - az) * t1;
-      const x2 = ax + (bx - ax) * t2, z2 = az + (bz - az) * t2;
-      if (flipNormal) {
-        verts.push(x1, topY, z1, x2, topY, z2, x1, botY, z1, x2, topY, z2, x2, botY, z2, x1, botY, z1);
-      } else {
-        verts.push(x1, topY, z1, x1, botY, z1, x2, topY, z2, x2, topY, z2, x1, botY, z1, x2, botY, z2);
-      }
-    }
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(verts), 3));
-  geo.computeVertexNormals();
-  return new THREE.Mesh(geo, mat);
-}
 
 // ═══════════ Terrarium tile helpers ═══════════
 
@@ -595,54 +616,47 @@ function buildMTL() {
 }
 
 function buildOBJ(group, terrainZoneIds) {
-  const lines = ['# TrailPrint3D OBJ Export', 'mtllib track-terrain.mtl', ''];
+  const vertLines = [];
+  const matFaces = Object.create(null);
   let vOff = 0;
 
   group.traverse(obj => {
     if (!obj.isMesh) return;
-
     const geo = obj.geometry.clone();
     geo.applyMatrix4(obj.matrixWorld);
-
     const pos = geo.getAttribute('position');
     const idx = geo.getIndex();
     const role = obj.userData.role || 'frame';
 
     for (let i = 0; i < pos.count; i++) {
-      lines.push(`v ${pos.getX(i).toFixed(4)} ${pos.getY(i).toFixed(4)} ${pos.getZ(i).toFixed(4)}`);
+      vertLines.push(`v ${pos.getX(i).toFixed(2)} ${pos.getY(i).toFixed(2)} ${pos.getZ(i).toFixed(2)}`);
     }
 
     const triCount = idx ? idx.count / 3 : pos.count / 3;
 
+    const pushFace = (name, a, b, c) => {
+      (matFaces[name] || (matFaces[name] = [])).push(`f ${a + vOff + 1} ${b + vOff + 1} ${c + vOff + 1}`);
+    };
+
     if (role === 'terrain' && terrainZoneIds) {
-      const buckets = [[], [], [], []];
+      const topN = obj.userData.topFaceCount || triCount;
       for (let i = 0; i < triCount; i++) {
         let a, b, c;
         if (idx) { a = idx.getX(i * 3); b = idx.getX(i * 3 + 1); c = idx.getX(i * 3 + 2); }
         else { a = i * 3; b = i * 3 + 1; c = i * 3 + 2; }
-        const zid = terrainZoneIds[a] ?? Z_BASE;
-        buckets[zid].push(a, b, c);
-      }
-      for (let z = 0; z < 4; z++) {
-        if (!buckets[z].length) continue;
-        lines.push(`usemtl ${OBJ_MATERIALS[z].name}`);
-        for (let i = 0; i < buckets[z].length; i += 3) {
-          lines.push(`f ${buckets[z][i] + vOff + 1} ${buckets[z][i + 1] + vOff + 1} ${buckets[z][i + 2] + vOff + 1}`);
+        if (i < topN) {
+          pushFace(OBJ_MATERIALS[terrainZoneIds[a] ?? Z_BASE].name, a, b, c);
+        } else {
+          pushFace('FRAME', a, b, c);
         }
       }
     } else {
-      let matName;
-      switch (role) {
-        case 'track': matName = 'TRAIL'; break;
-        case 'text':  matName = 'TEXT'; break;
-        default:      matName = 'FRAME'; break;
-      }
-      lines.push(`usemtl ${matName}`);
+      const matName = role === 'track' ? 'TRAIL' : role === 'text' ? 'TEXT' : 'FRAME';
       for (let i = 0; i < triCount; i++) {
         let a, b, c;
         if (idx) { a = idx.getX(i * 3); b = idx.getX(i * 3 + 1); c = idx.getX(i * 3 + 2); }
         else { a = i * 3; b = i * 3 + 1; c = i * 3 + 2; }
-        lines.push(`f ${a + vOff + 1} ${b + vOff + 1} ${c + vOff + 1}`);
+        pushFace(matName, a, b, c);
       }
     }
 
@@ -650,6 +664,13 @@ function buildOBJ(group, terrainZoneIds) {
     geo.dispose();
   });
 
+  const lines = ['# TrailPrint3D OBJ Export', 'mtllib track-terrain.mtl', ''];
+  lines.push(...vertLines, '');
+  for (const name of ['BASE', 'FOREST', 'MOUNTAIN', 'WATER', 'FRAME', 'TRAIL', 'TEXT']) {
+    if (!matFaces[name]?.length) continue;
+    lines.push(`usemtl ${name}`);
+    lines.push(...matFaces[name]);
+  }
   return lines.join('\n');
 }
 
