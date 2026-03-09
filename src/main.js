@@ -43,6 +43,8 @@ for (const [, s] of Object.entries(sliders)) {
   s.el.addEventListener('input', () => { s.out.textContent = s.fmt(s.el.value); });
 }
 
+const labelInputs = [0,1,2,3,4,5].map(i => $(`label-${i}`));
+
 function getSettings() {
   return {
     exaggeration: parseFloat(sliders.exaggeration.el.value),
@@ -51,6 +53,7 @@ function getSettings() {
     baseHeight: parseFloat(sliders.baseHeight.el.value),
     modelSize: parseFloat(sliders.modelSize.el.value),
     gridResolution: parseInt(sliders.gridResolution.el.value),
+    customLabels: labelInputs.map(el => el.value),
   };
 }
 
@@ -102,6 +105,16 @@ async function handleFile(file) {
   $('stat-min').textContent = Math.round(stats.minElev) + ' m';
   $('stat-speed').textContent = stats.avgSpeed > 0 ? stats.avgSpeed.toFixed(2) + ' / ' + stats.movingSpeed.toFixed(2) + ' km/h' : '\u2014';
   $('stat-time').textContent = stats.totalTimeSec > 0 ? formatTime(stats.movingTimeSec) + ' / ' + formatTime(stats.totalTimeSec) : '\u2014';
+
+  const defaultLabels = [
+    stats.trackName || '',
+    stats.elevGain != null ? `${Math.round(stats.elevGain)} m` : '',
+    stats.avgSpeed && stats.movingSpeed ? `${stats.avgSpeed.toFixed(2)} / ${stats.movingSpeed.toFixed(2)} km/h` : '',
+    stats.totalTimeSec && stats.movingTimeSec ? formatTime(stats.movingTimeSec) + ' / ' + formatTime(stats.totalTimeSec) : '',
+    stats.distance ? `${(stats.distance / 1000).toFixed(2)} km` : '',
+    stats.elevLoss != null ? `${Math.round(stats.elevLoss)} m` : '',
+  ];
+  labelInputs.forEach((el, i) => { el.value = defaultLabels[i]; });
 
   terrainBuilder = null;
 }

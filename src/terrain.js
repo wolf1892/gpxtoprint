@@ -40,6 +40,7 @@ export class TerrainBuilder {
       modelSize: settings.modelSize ?? 150,
       frameBorder: 12,
       frameHeight: 7,
+      customLabels: settings.customLabels || null,
     };
     this.group = null;
     this.bbox = null;
@@ -384,7 +385,9 @@ export class TerrainBuilder {
     const textMat = new THREE.MeshPhongMaterial({ color: 0xcccccc, side: THREE.DoubleSide });
     const meshes = [];
 
-    const labels = this._getFrameLabels(this.stats);
+    const labels = this.settings.customLabels && this.settings.customLabels.some(l => l)
+      ? this.settings.customLabels
+      : this._getFrameLabels(this.stats);
 
     for (let e = 0; e < 6; e++) {
       const text = labels[e];

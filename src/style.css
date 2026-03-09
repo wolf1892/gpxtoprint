@@ -225,6 +225,29 @@ html, body {
   width: 100%;
   accent-color: var(--accent);
 }
+#settings-body .form-field {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 10px;
+}
+#settings-body .form-field span {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+#settings-body .form-field input[type="text"] {
+  height: 30px;
+  padding: 0 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+#settings-body .form-field input[type="text"]:focus {
+  border-color: var(--accent);
+}
 
 /* Elevation panel */
 #elevation-panel {
