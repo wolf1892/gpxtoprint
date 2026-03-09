@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GPX Export — 3D Trail Map Generator</title>
+</head>
+<body>
+  <div id="app">
+    <header id="toolbar">
+      <div class="toolbar-left">
+        <span class="logo">GPX Export</span>
+        <button id="upload-btn" class="btn btn-primary">Upload GPX</button>
+        <span id="file-name"></span>
+      </div>
+      <div class="toolbar-center">
+        <div class="tab-group">
+          <button id="map-tab" class="tab active" data-view="map">Map</button>
+          <button id="3d-tab" class="tab" data-view="3d">3D</button>
+        </div>
+      </div>
+      <div class="toolbar-right">
+        <button id="export-btn" class="btn btn-accent" disabled>Export STL</button>
+        <button id="pod-btn" class="btn btn-pod" disabled>Print on Demand</button>
+      </div>
+    </header>
+
+    <main id="content">
+      <div id="view-area">
+        <div id="map-container" class="view-panel active"></div>
+        <div id="three-container" class="view-panel"></div>
+
+        <div id="empty-state">
+          <div class="empty-inner">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <p>Drop a GPX file here or click Upload</p>
+          </div>
+        </div>
+      </div>
+
+      <aside id="settings" class="collapsed">
+        <button id="settings-toggle" title="Settings">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+          </svg>
+        </button>
+        <div id="settings-body">
+          <h3>Model Settings</h3>
+          <label>
+            <span class="label-row">Elevation Scale <output id="exag-val">2×</output></span>
+            <input type="range" id="exaggeration" min="1" max="15" value="2" step="0.5">
+          </label>
+          <label>
+            <span class="label-row">Track Width <output id="tw-val">2 mm</output></span>
+            <input type="range" id="track-width" min="0.5" max="8" value="2" step="0.5">
+          </label>
+          <label>
+            <span class="label-row">Track Height <output id="th-val">1.5 mm</output></span>
+            <input type="range" id="track-height" min="0.5" max="5" value="1.5" step="0.5">
+          </label>
+          <label>
+            <span class="label-row">Base Height <output id="bh-val">5 mm</output></span>
+            <input type="range" id="base-height" min="1" max="20" value="5" step="1">
+          </label>
+          <label>
+            <span class="label-row">Model Size <output id="ms-val">150 mm</output></span>
+            <input type="range" id="model-size" min="50" max="300" value="150" step="10">
+          </label>
+          <label>
+            <span class="label-row">Grid Resolution <output id="gr-val">100</output></span>
+            <input type="range" id="grid-resolution" min="30" max="200" value="100" step="5">
+          </label>
+          <button id="rebuild-btn" class="btn btn-primary" style="width:100%;margin-top:12px" disabled>Rebuild 3D</button>
+        </div>
+      </aside>
+    </main>
+
+    <div id="elevation-panel">
+      <canvas id="elevation-canvas"></canvas>
+      <div id="stats-bar">
+        <span>Distance: <b id="stat-distance">—</b></span>
+        <span>Elev ↑: <b id="stat-gain">—</b></span>
+        <span>Elev ↓: <b id="stat-loss">—</b></span>
+        <span>Max: <b id="stat-max">—</b></span>
+        <span>Min: <b id="stat-min">—</b></span>
+        <span>Speed: <b id="stat-speed">—</b></span>
+        <span>Time: <b id="stat-time">—</b></span>
+      </div>
+    </div>
+
+    <div id="loading" class="hidden">
+      <div class="spinner"></div>
+      <p id="loading-text">Loading terrain…</p>
+    </div>
+
+    <div id="dropzone" class="hidden">
+      <div class="drop-inner">Drop GPX file</div>
+    </div>
+  </div>
+
+  <div id="pod-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>Print on Demand</h2>
+        <button id="pod-close" class="modal-close" title="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-section">
+          <h4>Track</h4>
+          <p id="pod-track-name" class="pod-track-name">—</p>
+        </div>
+        <div class="form-section">
+          <h4>Print Type</h4>
+          <div class="radio-group">
+            <label class="radio-label"><input type="radio" name="pod-type" value="color" checked><span>Colour</span></label>
+            <label class="radio-label"><input type="radio" name="pod-type" value="mono"><span>Monochrome</span></label>
+          </div>
+        </div>
+        <div class="form-section">
+          <h4>Shipping Details</h4>
+          <label class="form-field"><span>Full Name *</span><input type="text" id="pod-name" required></label>
+          <label class="form-field"><span>Email *</span><input type="email" id="pod-email" required></label>
+          <label class="form-field"><span>Address Line 1 *</span><input type="text" id="pod-addr1" required></label>
+          <label class="form-field"><span>Address Line 2</span><input type="text" id="pod-addr2"></label>
+          <div class="form-row">
+            <label class="form-field"><span>City *</span><input type="text" id="pod-city" required></label>
+            <label class="form-field"><span>State / Province</span><input type="text" id="pod-state"></label>
+          </div>
+          <div class="form-row">
+            <label class="form-field"><span>Pincode / ZIP *</span><input type="text" id="pod-zip" required></label>
+            <label class="form-field"><span>Country *</span><input type="text" id="pod-country" required></label>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="pod-cancel" class="btn btn-secondary">Cancel</button>
+        <button id="pod-pay" class="btn btn-success">Pay Now</button>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="file-input" accept=".gpx" hidden>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
