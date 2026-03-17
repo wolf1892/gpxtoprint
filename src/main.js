@@ -156,18 +156,19 @@ rebuildBtn.addEventListener('click', async () => { terrainBuilder = null; if (cu
 
 exportBtn.addEventListener('click', async () => {
   if (!gpxData) return;
-  showLoading('Generating OBJ\u2026');
+  showLoading('Generating 3MF\u2026');
   try {
     if (!terrainBuilder) {
       terrainBuilder = new TerrainBuilder(gpxData, getSettings(), cachedStats);
       await terrainBuilder.build(p => { loadingText.textContent = `Loading terrain\u2026 ${Math.round(p * 100)}%`; });
     }
-    loadingText.textContent = 'Writing OBJ\u2026';
+    loadingText.textContent = 'Writing 3MF\u2026';
     await new Promise(r => setTimeout(r, 50));
-    const { obj, mtl } = terrainBuilder.exportOBJ();
-    download(mtl, 'track-terrain.mtl', 'text/plain');
-    await new Promise(r => setTimeout(r, 100));
-    download(obj, 'track-terrain.obj', 'text/plain');
+    const blob = await terrainBuilder.export3MF();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'track-terrain.3mf'; a.click();
+    URL.revokeObjectURL(url);
   } catch (err) {
     console.error('Export failed:', err);
     alert('Export failed: ' + err.message);
